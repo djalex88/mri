@@ -6,11 +6,87 @@ GRAPPA, SPIRiT, ESPIRiT, PRUNO
 """
 
 import numpy as np
+from scipy.signal import convolve
 
 
-def grappa_kernel(f, R, r, v_size, num_nodes, acs_start, acs_stop, lamda=0):
+def grappa_kernel(f, kernel, acs_rect, lamda=0):
     """
     Computes convolutional kernel for the GRAPPA reconstruction algorithm [1].
+    
+    Parameters
+    ----------
+    f : numpy array of shape (num_coils, size_y, size_x)
+        k-space data
+    kernel : numpy array of shape (odd, odd)
+        kernel pattern
+    acs_rect : tuple of two tuples of two integers, i.e., ((y1, y2), (x1, x2))
+        describes ACS area
+    lamda : float, optional
+        Tykhonov regularization
+    
+    Returns
+    -------
+    G : ndarray
+        GRAPPA kernel
+    
+    References
+    ----------
+     [1]  M. A. Griswold, P. M. Jakob, R. M. Heidemann, M. Nittka,
+          V. Jellus, J. Wang, B. Kiefer, and A. Haase,
+          "Generalized autocalibrating partially parallel acquisitions (GRAPPA),"
+          Magnetic Resonance in Medicine, vol. 47, no. 6, pp. 1202–1210, 2002.
+    
+    """
+    
+    (y1, y2), (x1, x2) = acs_rect
+    
+    num_coils, size_y, size_x = f.shape
+    kh, kw = kernel.shape
+    
+    assert kw % 2 and kh % 2
+    assert kernel[kh//2, kw//2] == 0
+    
+    rows, cols = np.nonzero(kernel)
+    
+    num_el = len(rows) # number of non-null elements (nodes)
+    
+    # increase ACS area according to the size of non-null part of the kernel
+    x1 = x1 - cols.min()
+    y1 = y1 - rows.min()
+    x2 = x2 + kw - cols.max() - 1
+    y2 = y2 + kh - rows.max() - 1
+    
+    # size of target area
+    Nx = x2 - x1 - 2*(kw//2)
+    Ny = y2 - y1 - 2*(kh//2)
+    
+    # fill calibration matrix
+    A = np.empty(shape=(Nx*Ny, num_coils*num_el), dtype=f.dtype)
+    for j, idx in enumerate(range(Nx)):
+        for k in range(num_coils):
+            for m, (r, c) in enumerate(zip(rows+y1, cols+x1)):
+                A[j*Ny:(j+1)*Ny, k*num_el+m] = f[k,r:r+Ny,idx+c]
+    
+    Ah = np.conj(A.T)
+    X = Ah @ A
+    if lamda:
+        X+= np.diag(np.full(X.shape[0], lamda))
+    
+    # select target data and solve
+    b = f[:, y1+kh//2:y2-kh//2, x1+kw//2:x2-kw//2].transpose(2,1,0).reshape(-1, num_coils)
+    g = np.linalg.solve(X, Ah @ b).T.reshape(num_coils, num_coils, num_el)
+    
+    # create kernels
+    G = np.zeros((num_coils, num_coils, kh, kw), dtype=f.dtype)
+    G[...,rows,cols] = g[...]
+    
+    return np.ascontiguousarray(np.flip(G, axis=(-2,-1)))
+
+
+def grappa_kernel_1d(f, R, r, v_size, num_nodes, acs_start, acs_stop, lamda=0):
+    """
+    A special case of the GRAPPA kernel calculation algorithm for 1D acceleration.
+    This assumes the readout direction (frequency encoding direction) is vertical.
     
     Parameters
     ----------
@@ -36,13 +112,6 @@ def grappa_kernel(f, R, r, v_size, num_nodes, acs_start, acs_stop, lamda=0):
     -------
     G : ndarray
         GRAPPA kernel
-    
-    References
-    ----------
-    [1]  M. A. Griswold, P. M. Jakob, R. M. Heidemann, M. Nittka,
-    V. Jellus, J. Wang, B. Kiefer, and A. Haase,
-    "Generalized autocalibrating partially parallel acquisitions (GRAPPA),"
-    Magnetic Resonance in Medicine, vol. 47, no. 6, pp. 1202–1210, 2002.
     
     """
     
@@ -119,13 +188,11 @@ def calibration_matrix(acs, width, height, mode='conv'):
     assert width % 2 and height % 2
     assert width <= size_x and height <= size_y
     
-    indices = [slice(j-width//2, j+width//2+1) for j in range(width//2, size_x-width//2)]
-    
-    A = np.empty(shape=(Ny*len(indices), num_coils*kernel_size), dtype=acs.dtype)
-    for j, idx1 in enumerate(indices):
+    A = np.empty(shape=(Ny*(size_x-width+1), num_coils*kernel_size), dtype=acs.dtype)
+    for j in range(size_x-width+1):
         for k in range(num_coils):
             for m in range(height):
-                A[j*Ny:(j+1)*Ny, k*kernel_size+m*width:k*kernel_size+(m+1)*width] = acs[k,m:m+Ny,idx1]
+                A[j*Ny:(j+1)*Ny, k*kernel_size+m*width:k*kernel_size+(m+1)*width] = acs[k,m:m+Ny,j:j+width]
     
     return A
 
@@ -152,9 +219,9 @@ def spirit_kernel(f, kernel_width, kernel_height, acs_rect):
     
     References
     ----------
-    [1]  M. Lustig and J. M. Pauly, "SPIRiT: Iterative self-consistent
-    parallel imaging reconstruction from arbitrary k-space,"
-    Magnetic Resonance in Medicine, vol. 64, no. 2, pp. 457–471, 2010.
+     [1]  M. Lustig and J. M. Pauly, "SPIRiT: Iterative self-consistent
+          parallel imaging reconstruction from arbitrary k-space,"
+          Magnetic Resonance in Medicine, vol. 64, no. 2, pp. 457–471, 2010.
     
     """
     
@@ -207,9 +274,9 @@ def null_space(f, N, kernel_width, kernel_height, acs_rect):
     
     References
     ----------
-    [1]  J. Zhang, C. Liu, and M. E. Moseley,
-    "Parallel reconstruction using null operations,"
-    Magnetic Resonance in Medicine, vol. 66, no. 5, pp. 1241–1253, 2011.
+     [1]  J. Zhang, C. Liu, and M. E. Moseley,
+          "Parallel reconstruction using null operations,"
+          Magnetic Resonance in Medicine, vol. 66, no. 5, pp. 1241–1253, 2011.
     
     """
     
@@ -249,11 +316,11 @@ def espirit(f, kernel_width, kernel_height, acs_rect, num_basis=100, threshold=0
     
     References
     ----------
-    [1]  M. Uecker, P. Lai, M. J. Murphy, P. Virtue, M. Elad, J. M. Pauly,
-    S. S. Vasanawala, and M. Lustig,
-    "ESPIRiT – an eigenvalue approach to autocalibrating parallel MRI:
-    Where SENSE meets GRAPPA,"
-    Magnetic Resonance in Medicine, vol. 71, no. 3, pp. 990–1001, 2014.
+     [1]  M. Uecker, P. Lai, M. J. Murphy, P. Virtue, M. Elad, J. M. Pauly,
+          S. S. Vasanawala, and M. Lustig,
+          "ESPIRiT – an eigenvalue approach to autocalibrating parallel MRI:
+          Where SENSE meets GRAPPA,"
+          Magnetic Resonance in Medicine, vol. 71, no. 3, pp. 990–1001, 2014.
     
     """
     
@@ -263,7 +330,7 @@ def espirit(f, kernel_width, kernel_height, acs_rect, num_basis=100, threshold=0
         for i in range(C):
             for j in range(C):
                 for k in range(N):
-                    h[i,j,...]+= np.convolve(np.flip(g[k,i,...].conj(), axis=(-2,-1)), g[k,j,...], mode='full')
+                    h[i,j,...]+= convolve(np.flip(g[k,i,...].conj(), axis=(-2,-1)), g[k,j,...], mode='full')
         return h
     
     (y1, y2), (x1, x2) = acs_rect
@@ -274,7 +341,7 @@ def espirit(f, kernel_width, kernel_height, acs_rect, num_basis=100, threshold=0
     
     Vh = np.linalg.svd(A)[-1]
     
-    # get basis vectors
+    # get basis vectors (kernels)
     G = Vh[:num_basis].conj().reshape(-1, num_coils, kernel_height, kernel_width)
     G = compute_GtG(G)
     
@@ -285,12 +352,12 @@ def espirit(f, kernel_width, kernel_height, acs_rect, num_basis=100, threshold=0
     g = np.zeros((num_coils, num_coils, size_y, size_x), dtype=G.dtype)
     g[..., pos_y:pos_y+ky, pos_x:pos_x+kx] = G[...]
     g = np.fft.ifft2(np.fft.ifftshift(g, axes=(-2,-1)), norm='ortho') * (size_x*size_y)**0.5
-    g = np.ascontiguousarray(g.transpose(2,3,0,1).reshape(-1, num_coils, num_coils))
+    g = np.ascontiguousarray(g.transpose(2,3,0,1)).reshape(-1, num_coils, num_coils)
     
     w, s = np.linalg.eigh(g)
     
     # normalize eigvals with kernel size
-    w = w.real / (kernel_width*kernel_height)
+    w = w / (kernel_width*kernel_height)
     
     # select eigenpairs corresponding to 1
     idx = w.argmax(axis=-1)
@@ -299,5 +366,5 @@ def espirit(f, kernel_width, kernel_height, acs_rect, num_basis=100, threshold=0
     
     s[w < (1-threshold)] = 0
     
-    return np.ascontiguousarray(s.T.reshape(num_coils, size_y, size_x))
+    return np.ascontiguousarray(s.T).reshape(num_coils, size_y, size_x)
 
