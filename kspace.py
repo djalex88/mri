@@ -9,6 +9,32 @@ import numpy as np
 from scipy.signal import convolve
 
 
+def conv(array, w):
+    """
+    Simple (unoptimized) implementation of the convolution operator in k-space.
+    
+    Parameters
+    ----------
+    array : numpy array of shape (num_coils, size_y, size_x)
+        k-space data
+    w : numpy array of shape (N, num_coils, kernel_height, kernel_width)
+        convolutional kernel
+    
+    Returns
+    -------
+    out : ndarray
+        k-space data
+    
+    """
+    N, C = w.shape[:2]
+    H, W = array.shape[-2:]
+    out = np.zeros(shape=(N, H, W), dtype=array.dtype)
+    for i in range(N):
+        for j in range(C):
+            out[i,...]+= convolve(array[j,...], w[i,j,...], mode='same')
+    return out
+
+
 def grappa_kernel(f, kernel, acs_rect, lamda=0):
     """
     Computes convolutional kernel for the GRAPPA reconstruction algorithm [1].

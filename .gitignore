@@ -1,2 +1,5 @@
 # python cache
 *.pyc
+
+# everything in test dir
+test/*
